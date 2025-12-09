@@ -118,12 +118,22 @@ class ProxyManager {
     return this.browserClient !== null && this.browserClient.readyState === 1; // OPEN
   }
   
-  setupWebSocket() {
-    this.wss = new WebSocketServer({ port: CONFIG.WS_PORT });
+setupWebSocket() {
+    // 修改这里：增加 maxPayload 限制，并关闭压缩以提高大文本传输稳定性
+    this.wss = new WebSocketServer({ 
+        port: CONFIG.WS_PORT,
+        maxPayload: 100 * 1024 * 1024, // 设置最大允许 100MB 的数据包 (足够应对超长 Prompt)
+        perMessageDeflate: false       // 关闭压缩 (有些网络环境下压缩大包会导致连接断开)
+    });
     
     this.wss.on('connection', (ws) => {
       Logger.success('🔗 浏览器客户端已连接');
       
+      // 增加错误处理，防止个别连接报错导致整个服务崩溃
+      ws.on('error', (err) => {
+          Logger.error('❌ WebSocket 连接发生错误:', err.message);
+      });
+
       this.browserClient = ws;
       
       ws.on('message', (data) => {
@@ -138,15 +148,12 @@ class ProxyManager {
         this.pendingRequests.forEach((pending) => {
           if (!pending.res.headersSent) {
             pending.res.status(502).json({
-              error: 'Browser disconnected'
+              error: 'Browser disconnected',
+              message: '浏览器连接在处理请求时断开，可能是请求内容过长导致'
             });
           }
         });
         this.pendingRequests.clear();
-      });
-      
-      ws.on('error', (error) => {
-        Logger.error('WebSocket错误:', error.message);
       });
     });
     
@@ -171,15 +178,42 @@ class ProxyManager {
         Logger.log(`🔧 修正后的路径: ${targetPath}`);
     }
     
+    // --- 1.5 [新增] 参数清洗逻辑 (移除 API Key) ---
+    // 复制一份 query 参数，避免修改原对象
+    const targetQuery = { ...req.query };
+    
+    // 既然是在浏览器里跑，是靠 Cookie 鉴权的。
+    // 如果带了错误的 key (比如 key=ee)，Google 会报 400 Invalid Argument。
+    // 所以这里强制删除 key 参数。
+    if (targetQuery.key) {
+        // Logger.log(`🧹 已移除请求中的 API Key 参数 (使用浏览器 Cookie 鉴权)`);
+        delete targetQuery.key;
+    }
+
     // 构建请求规范
     const requestSpec = {
       request_id: requestId,
       method: req.method,
-      path: req.path,
+      path: targetPath,
       query_params: req.query,
       headers: this.sanitizeHeaders(req.headers),
       body: req.body ? (typeof req.body === 'string' ? req.body : JSON.stringify(req.body)) : undefined
     };
+
+
+    // --- 3. [DEBUG核心] 打印完整数据包以供对比 ---
+    console.log('\n🔻🔻🔻🔻🔻 [DEBUG: 发送给浏览器的数据包开始] 🔻🔻🔻🔻🔻');
+    console.log(`请求来源ID: ${requestId}`);
+    try {
+        // 尝试美化输出，方便肉眼对比
+        console.log(JSON.stringify(requestSpec, null, 2));
+    } catch (e) {
+        // 如果失败则直接输出原始对象
+        console.log(requestSpec);
+    }
+    console.log('🔺🔺🔺🔺🔺 [DEBUG: 发送给浏览器的数据包结束] 🔺🔺🔺🔺🔺\n');
+    // --------------------------------------------------
+
     
     Logger.log(`📤 转发请求到浏览器: ${requestId}`);
     
@@ -241,31 +275,58 @@ class ProxyManager {
     }
   }
   
+// 1. 替换 handleResponseHeaders 方法
   handleResponseHeaders(message, pending) {
-    if (pending.headersSent) return;
+    if (pending.headersSent) {
+        console.log(`[DEBUG] ⚠️ 警告: 尝试设置响应头，但头已发送 (ID: ${message.request_id})`);
+        return;
+    }
     
+    // [DEBUG] 打印浏览器传回来的原始头
+    console.log(`\n📥 [DEBUG: 收到浏览器响应头] ID: ${message.request_id}`);
+    console.log(`Status: ${message.status}`);
+    console.log(`Headers:`, JSON.stringify(message.headers, null, 2));
+
     // 设置状态码
     pending.res.status(message.status);
     
     // 设置响应头
     if (message.headers) {
       Object.entries(message.headers).forEach(([key, value]) => {
-        // 跳过一些不应该转发的头
         const lowerKey = key.toLowerCase();
-        if (!['transfer-encoding', 'content-encoding', 'content-length'].includes(lowerKey)) {
+        // 排除掉可能引起问题的传输头
+        if (!['transfer-encoding', 'content-encoding', 'content-length', 'connection'].includes(lowerKey)) {
           pending.res.setHeader(key, value);
         }
       });
     }
     
+    // [强行补救] 如果是流式传输且没有 content-type，强行加上
+    // 很多客户端（如AMA, Rikka）如果没看到 text/event-stream 就会报错
+    const existingContentType = pending.res.getHeader('content-type');
+    if (!existingContentType && message.status === 200) {
+        console.log('[DEBUG] ⚠️ 响应头缺少 Content-Type，正在尝试自动补全为 text/event-stream');
+        pending.res.setHeader('Content-Type', 'text/event-stream');
+    }
+
     pending.headersSent = true;
-    Logger.log(`📥 响应头已接收: ${message.request_id} (状态: ${message.status})`);
+    Logger.log(`📥 响应头已处理并发送给客户端`);
   }
   
+  // 2. 替换 handleChunk 方法
   handleChunk(message, pending) {
     if (!pending.headersSent) {
-      // 如果还没发送头，先发送默认头
+      // [严重警告] 如果代码运行到这里，说明收到数据块时，头还没处理！
+      // 这会导致 Express 发送默认的 header (不包含 content-type)
+      console.log(`\n☠️ [严重错误] ID: ${message.request_id} - 在收到响应头之前收到了数据块！`);
+      console.log(`这将导致客户端收到 "invalid content-type"`);
+      
+      // 紧急补救：手动发送 SSE 头
       pending.res.status(200);
+      pending.res.setHeader('Content-Type', 'text/event-stream');
+      pending.res.setHeader('Cache-Control', 'no-cache');
+      pending.res.setHeader('Connection', 'keep-alive');
+      
       pending.headersSent = true;
     }
     
