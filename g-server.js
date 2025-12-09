@@ -157,11 +157,19 @@ class ProxyManager {
     if (!this.isConnected()) {
       return res.status(503).json({
         error: 'Browser not connected',
-        message: '浏览器代理未连接，请在浏览器控制台执行 dark-browser.js'
+        message: '浏览器代理未连接，请运行 g-browser.js'
       });
     }
     
     const requestId = `req_${++this.requestIdCounter}_${Date.now()}`;
+
+    let targetPath = req.path;
+    // 检测并修复 /models/models/ 的情况
+    if (targetPath.includes('/models/models/')) {
+        Logger.log(`⚠️ 检测到路径重复，正在自动修正: ${targetPath}`);
+        targetPath = targetPath.replace('/models/models/', '/models/');
+        Logger.log(`🔧 修正后的路径: ${targetPath}`);
+    }
     
     // 构建请求规范
     const requestSpec = {
@@ -340,7 +348,7 @@ async function main() {
     console.log('📝 使用说明:');
     console.log('1. 在浏览器中打开 AI Studio 并登录');
     console.log('2. 按 F12 打开开发者工具');
-    console.log('3. 在控制台执行 dark-browser.js 代码');
+    console.log('3. 运行 g-browser.js 代码');
     console.log('4. 看到 "浏览器代理系统已成功启动" 后即可使用');
     console.log('\n💡 测试命令:');
     console.log(`   GET  http://127.0.0.1:${CONFIG.HTTP_PORT}/v1beta/models`);
