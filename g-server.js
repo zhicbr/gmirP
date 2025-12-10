@@ -160,7 +160,7 @@ setupWebSocket() {
     Logger.success(`WebSocket服务启动成功: ws://127.0.0.1:${CONFIG.WS_PORT}`);
   }
   
-  async forwardRequest(req, res) {
+async forwardRequest(req, res) {
     if (!this.isConnected()) {
       return res.status(503).json({
         error: 'Browser not connected',
@@ -171,50 +171,92 @@ setupWebSocket() {
     const requestId = `req_${++this.requestIdCounter}_${Date.now()}`;
 
     let targetPath = req.path;
-    // 检测并修复 /models/models/ 的情况
+    // 检测并修复 /models/models/ 的情况  （兼容rikkahub）
     if (targetPath.includes('/models/models/')) {
         Logger.log(`⚠️ 检测到路径重复，正在自动修正: ${targetPath}`);
         targetPath = targetPath.replace('/models/models/', '/models/');
         Logger.log(`🔧 修正后的路径: ${targetPath}`);
     }
     
-    // --- 1.5 [新增] 参数清洗逻辑 (移除 API Key) ---
-    // 复制一份 query 参数，避免修改原对象
+    // ---  参数清洗逻辑 (移除 API Key) （兼容rikkahub）---
     const targetQuery = { ...req.query };
-    
-    // 既然是在浏览器里跑，是靠 Cookie 鉴权的。
-    // 如果带了错误的 key (比如 key=ee)，Google 会报 400 Invalid Argument。
-    // 所以这里强制删除 key 参数。
     if (targetQuery.key) {
-        // Logger.log(`🧹 已移除请求中的 API Key 参数 (使用浏览器 Cookie 鉴权)`);
         delete targetQuery.key;
     }
+
+    // --- 清洗 Body 中的 tools 参数 （兼容rikkahub）---
+    let finalBody = req.body;
+    
+    // 1. 确保我们需要处理的是对象
+    if (typeof finalBody === 'string') {
+        try {
+            finalBody = JSON.parse(finalBody);
+        } catch (e) {
+            // 如果解析失败，说明不是 JSON，保持原样
+            Logger.error('解析请求 Body 失败，将按原样发送');
+        }
+    }
+
+    // 2. 检查并移除 tools
+    if (typeof finalBody === 'object' && finalBody !== null) {
+        // 检查是否存在 conflicts (tools + thinking)
+        const hasTools = finalBody.tools && finalBody.tools.length > 0;
+        const hasThinking = finalBody.generationConfig && finalBody.generationConfig.thinkingConfig;
+
+        // 策略：为了保证请求成功，如果发现 tools，强制移除。
+        // 你也可以改为：if (hasTools && hasThinking) 来只在冲突时移除
+        if (hasTools) {
+            Logger.log(`🧹 [自动修复] 检测到 tools 参数 (Memory功能)。`);
+            Logger.log(`   由于 tools 与 Thinking 模式往往冲突，正在移除 tools 字段...`);
+            Logger.log(`   (注：System Instruction 中的记忆文本依然保留，AI 仍能读取记忆)`);
+            
+            delete finalBody.tools;
+        }
+
+                // [修复 2] 强制覆盖安全设置 (解决 OFF vs BLOCK_NONE 问题)
+        // 无论客户端传什么，或者是没传，这里都强制覆盖为“不过滤”
+        Logger.log(`🛡️ [自动修复] 强制将安全设置调整为 BLOCK_NONE`);
+        finalBody.safetySettings = [
+            { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+            { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+            { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+            { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
+            { category: "HARM_CATEGORY_CIVIC_INTEGRITY", threshold: "BLOCK_NONE" }
+        ];
+        
+    }
+    // --------------------------------------------------
 
     // 构建请求规范
     const requestSpec = {
       request_id: requestId,
       method: req.method,
       path: targetPath,
-      query_params: req.query,
+      query_params: targetQuery,
       headers: this.sanitizeHeaders(req.headers),
-      body: req.body ? (typeof req.body === 'string' ? req.body : JSON.stringify(req.body)) : undefined
+      // 使用处理后的 finalBody
+      body: JSON.stringify(finalBody)
     };
 
 
-    // --- 3. [DEBUG核心] 打印完整数据包以供对比 ---
+    // --- 3. [DEBUG核心] 打印完整数据包 (无省略) ---
     console.log('\n🔻🔻🔻🔻🔻 [DEBUG: 发送给浏览器的数据包开始] 🔻🔻🔻🔻🔻');
     console.log(`请求来源ID: ${requestId}`);
+    
     try {
-        // 尝试美化输出，方便肉眼对比
+        // 直接打印完整对象，不做任何截断
         console.log(JSON.stringify(requestSpec, null, 2));
     } catch (e) {
-        // 如果失败则直接输出原始对象
+        // 如果 JSON 序列化失败，直接打印原始对象
         console.log(requestSpec);
     }
     console.log('🔺🔺🔺🔺🔺 [DEBUG: 发送给浏览器的数据包结束] 🔺🔺🔺🔺🔺\n');
     // --------------------------------------------------
 
     
+
+
+
     Logger.log(`📤 转发请求到浏览器: ${requestId}`);
     
     // 发送到浏览器
@@ -302,7 +344,7 @@ setupWebSocket() {
     }
     
     // [强行补救] 如果是流式传输且没有 content-type，强行加上
-    // 很多客户端（如AMA, Rikka）如果没看到 text/event-stream 就会报错
+    // 很多客户端如果没看到 text/event-stream 就会报错   （兼容rikkahub）
     const existingContentType = pending.res.getHeader('content-type');
     if (!existingContentType && message.status === 200) {
         console.log('[DEBUG] ⚠️ 响应头缺少 Content-Type，正在尝试自动补全为 text/event-stream');
@@ -329,7 +371,9 @@ setupWebSocket() {
       
       pending.headersSent = true;
     }
-    
+    if (message.data) {
+        console.log(`📦 [数据块内容]: ${message.data.trim()}`);
+    }
     // 写入数据块
     pending.res.write(message.data);
   }
