@@ -276,7 +276,7 @@ async forwardRequest(req, res) {
             });
           }
         }
-      }, 120000) // 120秒超时
+      }, 600000) // 10分钟
     });
   }
   
@@ -317,8 +317,21 @@ async forwardRequest(req, res) {
     }
   }
   
-// 1. 替换 handleResponseHeaders 方法
+  // 1. 替换 handleResponseHeaders 方法
   handleResponseHeaders(message, pending) {
+      // 到头也重置计时器 ---
+    if (pending.timeout) {
+      clearTimeout(pending.timeout);
+      // 重置为 5 分钟
+      pending.timeout = setTimeout(() => {
+         // ... (同 handleChunk 中的逻辑，或者简化处理)
+         if (this.pendingRequests.has(message.request_id)) {
+            this.pendingRequests.delete(message.request_id);
+            pending.res.end();
+         }
+      }, 300000);
+    }
+
     if (pending.headersSent) {
         console.log(`[DEBUG] ⚠️ 警告: 尝试设置响应头，但头已发送 (ID: ${message.request_id})`);
         return;
@@ -357,6 +370,28 @@ async forwardRequest(req, res) {
   
   // 2. 替换 handleChunk 方法
   handleChunk(message, pending) {
+
+    // 心跳保活逻辑 
+    // 每次收到 chunk，说明连接还活着，清除旧的超时定时器，重新计时
+    if (pending.timeout) {
+      clearTimeout(pending.timeout);
+    }
+    
+    // 重置超时为 5 分钟（即：如果 5 分钟内没有新字吐出来，才算超时）
+    pending.timeout = setTimeout(() => {
+      if (this.pendingRequests.has(message.request_id)) {
+        Logger.error(`请求长时间无数据传输，判定超时: ${message.request_id}`);
+        this.pendingRequests.delete(message.request_id);
+        if (!pending.res.headersSent) {
+           // 这里很难进入，因为通常chunk来的时候header已经发了，但为了健壮性保留
+           pending.res.status(504).end(); 
+        } else {
+           pending.res.end(); // 强制断开 HTTP 流
+        }
+      }
+    }, 300000); // 300秒空闲超时
+
+
     if (!pending.headersSent) {
       // [严重警告] 如果代码运行到这里，说明收到数据块时，头还没处理！
       // 这会导致 Express 发送默认的 header (不包含 content-type)
