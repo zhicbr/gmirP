@@ -103,6 +103,11 @@ const Logger = {
     
     this.container.appendChild(logLine);
     
+    // 限制 DOM 节点数量防止崩溃 (保留 Header + 200 行)
+    while (this.container.children.length > 201) {
+      this.container.removeChild(this.container.children[1]);
+    }
+    
     // 智能滚动：如果用户没有向上滚动查看历史，则自动滚到底部
     const isScrolledToBottom = this.container.scrollHeight - this.container.clientHeight <= this.container.scrollTop + 50;
     if (isScrolledToBottom || type === 'error' || type === 'system') {
@@ -418,6 +423,7 @@ class ProxySystem extends EventTarget {
     this.connectionManager = new ConnectionManager(websocketEndpoint);
     this.requestProcessor = new RequestProcessor();
     this.streamHandler = new StreamHandler(this.connectionManager);
+    this.statusDot = null; // 状态灯
     
     this._setupEventHandlers();
   }
@@ -425,6 +431,11 @@ class ProxySystem extends EventTarget {
   async initialize() {
     Logger.system('[ProxySystem] 系统初始化中...');
     
+    // [新增] 初始化右上角状态灯
+    this.statusDot = document.createElement('div');
+    this.statusDot.style.cssText = "position:fixed; top:15px; right:15px; width:12px; height:12px; border-radius:50%; background:gray; z-index:9999; border: 2px solid #333; transition: background 0.2s;";
+    document.body.appendChild(this.statusDot);
+
     try {
       await this.connectionManager.establish();
       Logger.system('[ProxySystem] 系统初始化完成，就绪');
@@ -438,10 +449,20 @@ class ProxySystem extends EventTarget {
   
   _setupEventHandlers() {
     this.connectionManager.addEventListener('message', (event) => {
+      // 收到消息闪烁黄色
+      if (this.statusDot) {
+          this.statusDot.style.background = '#f1c40f';
+          setTimeout(() => this.statusDot.style.background = '#2ecc71', 100);
+      }
       this._handleIncomingMessage(event.detail);
     });
     
+    this.connectionManager.addEventListener('connected', () => {
+        if (this.statusDot) this.statusDot.style.background = '#2ecc71'; // 绿
+    });
+
     this.connectionManager.addEventListener('disconnected', () => {
+      if (this.statusDot) this.statusDot.style.background = '#ff6b6b'; // 红
       Logger.warn('[ProxySystem] WebSocket 断开，取消所有进行中的请求');
       this.requestProcessor.cancelAllOperations();
     });
