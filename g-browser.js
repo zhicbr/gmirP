@@ -1,17 +1,124 @@
-
-// 调试输出模块
+// ==========================================
+// 调试输出模块 (全屏终端版)
+// ==========================================
 const Logger = {
   enabled: true,
-  
-  output(...messages) {
-    if (!this.enabled) return;
+  container: null,
+
+  // 初始化全屏终端 UI
+  _initUI() {
+    if (this.container) return;
+
+    // 1. 注入全局样式 (重置 body, 自定义滚动条)
+    const styleSheet = document.createElement('style');
+    styleSheet.textContent = `
+      * { box-sizing: border-box; }
+      html, body { 
+        margin: 0; padding: 0; width: 100%; height: 100%; 
+        background-color: #0c0c0c; overflow: hidden; 
+      }
+      /* 自定义滚动条样式 -更像终端 */
+      ::-webkit-scrollbar { width: 10px; }
+      ::-webkit-scrollbar-track { background: #1a1a1a; }
+      ::-webkit-scrollbar-thumb { background: #333; border-radius: 5px; border: 2px solid #1a1a1a; }
+      ::-webkit-scrollbar-thumb:hover { background: #555; }
+    `;
+    document.head.appendChild(styleSheet);
+
+    // 2. 创建主容器
+    this.container = document.createElement('div');
+    Object.assign(this.container.style, {
+      width: '100%',
+      height: '100vh',
+      backgroundColor: '#0c0c0c', // 深黑背景
+      color: '#cccccc',           // 默认灰白字
+      fontFamily: '"Menlo", "Monaco", "Consolas", "Courier New", monospace',
+      fontSize: '14px',
+      lineHeight: '1.6',
+      padding: '20px',
+      overflowY: 'auto',          // 允许纵向滚动
+      whiteSpace: 'pre-wrap',     // 保留换行
+      wordBreak: 'break-all'
+    });
     
-    const timestamp = this._getTimestamp();
-    const logElement = document.createElement('div');
-    logElement.textContent = `[${timestamp}] ${messages.join(' ')}`;
-    document.body.appendChild(logElement);
+    // 添加终端头部
+    const header = document.createElement('div');
+    header.innerHTML = `
+      <div style="color: #00ff00; font-weight: bold; margin-bottom: 20px; padding-bottom: 10px; border-bottom: 1px dashed #333;">
+        > PROXY SYSTEM TERMINAL_v1.0 <span style="float:right">STATUS: ONLINE</span>
+      </div>
+    `;
+    this.container.appendChild(header);
+
+    document.body.appendChild(this.container);
   },
-  
+
+  // 内部通用打印函数
+  _print(type, icon, ...messages) {
+    if (!this.enabled) return;
+    if (!this.container) this._initUI();
+
+    const timestamp = this._getTimestamp();
+    // 处理对象打印，防止显示 [object Object]
+    const messageText = messages.map(m => {
+      if (typeof m === 'object') {
+        try { return JSON.stringify(m, null, 2); } catch(e) { return String(m); }
+      }
+      return String(m);
+    }).join(' ');
+
+    // 1. 浏览器控制台输出 (保持原有彩色)
+    const consoleStyles = {
+      info:    'color: #00bfff;',
+      success: 'color: #2ecc71;',
+      warn:    'color: #f1c40f;',
+      error:   'color: #e74c3c;',
+      system:  'color: #d35400;'
+    };
+    console.log(`%c[${timestamp}] ${icon} ${messageText}`, consoleStyles[type] || '');
+
+    // 2. 页面终端输出
+    const logLine = document.createElement('div');
+    logLine.style.marginBottom = '6px';
+    logLine.style.display = 'flex';
+    
+    // 定义颜色映射
+    let colorStyle = '#eee'; // 默认
+    let bgStyle = 'transparent';
+    
+    if (type === 'info') colorStyle = '#61dafb';     // 浅蓝
+    if (type === 'success') colorStyle = '#2ecc71';  // 绿色
+    if (type === 'warn') colorStyle = '#f1c40f';     // 黄色
+    if (type === 'error') {
+      colorStyle = '#ff6b6b';                        // 红色
+      bgStyle = 'rgba(255, 107, 107, 0.1)';          // 错误行加个淡红背景
+    } 
+    if (type === 'system') colorStyle = '#ff79c6';   // 粉紫
+
+    logLine.innerHTML = `
+      <span style="color: #555; margin-right: 10px; flex-shrink: 0; user-select: none;">[${timestamp}]</span>
+      <span style="margin-right: 8px; user-select: none;">${icon}</span>
+      <span style="color: ${colorStyle}; background: ${bgStyle}; flex: 1;">${messageText}</span>
+    `;
+    
+    this.container.appendChild(logLine);
+    
+    // 智能滚动：如果用户没有向上滚动查看历史，则自动滚到底部
+    const isScrolledToBottom = this.container.scrollHeight - this.container.clientHeight <= this.container.scrollTop + 50;
+    if (isScrolledToBottom || type === 'error' || type === 'system') {
+        this.container.scrollTop = this.container.scrollHeight;
+    }
+  },
+
+  info(...args) { this._print('info', 'ℹ️', ...args); },
+  success(...args) { this._print('success', '✅', ...args); },
+  warn(...args) { this._print('warn', '⚠️', ...args); },
+  error(...args) { this._print('error', '❌', ...args); },
+  system(...args) { this._print('system', '🚀', ...args); },
+
+  // 兼容旧接口
+  output(...args) { this.info(...args); },
+
   _getTimestamp() {
     const now = new Date();
     const time = now.toLocaleTimeString('zh-CN', { hour12: false });
@@ -19,6 +126,10 @@ const Logger = {
     return `${time}.${ms}`;
   }
 };
+
+// ==========================================
+// 以下逻辑代码保持完全不变
+// ==========================================
 
 // WebSocket连接管理器
 class ConnectionManager extends EventTarget {
@@ -34,11 +145,11 @@ class ConnectionManager extends EventTarget {
   
   async establish() {
     if (this.isConnected) {
-      Logger.output('[ConnectionManager] 连接已存在');
+      Logger.warn('[ConnectionManager] 连接已存在，跳过');
       return Promise.resolve();
     }
     
-    Logger.output('[ConnectionManager] 建立连接:', this.endpoint);
+    Logger.info('[ConnectionManager] 正在建立连接:', this.endpoint);
     
     return new Promise((resolve, reject) => {
       this.socket = new WebSocket(this.endpoint);
@@ -46,20 +157,20 @@ class ConnectionManager extends EventTarget {
       this.socket.addEventListener('open', () => {
         this.isConnected = true;
         this.reconnectAttempts = 0;
-        Logger.output('[ConnectionManager] 连接建立成功');
+        Logger.success('[ConnectionManager] 连接建立成功');
         this.dispatchEvent(new CustomEvent('connected'));
         resolve();
       });
       
       this.socket.addEventListener('close', () => {
         this.isConnected = false;
-        Logger.output('[ConnectionManager] 连接断开，准备重连');
+        Logger.warn('[ConnectionManager] 连接断开，准备重连...');
         this.dispatchEvent(new CustomEvent('disconnected'));
         this._scheduleReconnect();
       });
       
       this.socket.addEventListener('error', (error) => {
-        Logger.output('[ConnectionManager] 连接错误:', error);
+        Logger.error('[ConnectionManager] 连接发生错误');
         this.dispatchEvent(new CustomEvent('error', { detail: error }));
         if (!this.isConnected) reject(error);
       });
@@ -72,7 +183,7 @@ class ConnectionManager extends EventTarget {
   
   transmit(data) {
     if (!this.isConnected || !this.socket) {
-      Logger.output('[ConnectionManager] 无法发送数据：连接未建立');
+      Logger.error('[ConnectionManager] 无法发送数据：连接未建立');
       return false;
     }
     
@@ -82,13 +193,13 @@ class ConnectionManager extends EventTarget {
   
   _scheduleReconnect() {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      Logger.output('[ConnectionManager] 达到最大重连次数');
+      Logger.error('[ConnectionManager] 达到最大重连次数，放弃重连');
       return;
     }
     
     this.reconnectAttempts++;
     setTimeout(() => {
-      Logger.output(`[ConnectionManager] 重连尝试 ${this.reconnectAttempts}`);
+      Logger.warn(`[ConnectionManager] 重连尝试 ${this.reconnectAttempts}...`);
       this.establish().catch(() => {});
     }, this.reconnectDelay);
   }
@@ -102,7 +213,7 @@ class RequestProcessor {
   }
   
   async execute(requestSpec, operationId) {
-    Logger.output('[RequestProcessor] 执行请求:', requestSpec.method, requestSpec.path, '(ID:', operationId, ')');
+    Logger.info(`[RequestProcessor] 执行请求: ${requestSpec.method} ${requestSpec.path} (ID: ${operationId})`);
 
     const abortController = new AbortController();
     this.activeOperations.set(operationId, abortController);
@@ -113,16 +224,17 @@ class RequestProcessor {
 
       let lastError = null;
       const maxRetries = 15;
-      const retryDelay = 1000; // 1 second
+      const retryDelay = 1000;
 
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
         if (abortController.signal.aborted) {
-          Logger.output('[RequestProcessor] Operation cancelled before attempt', attempt, 'for ID:', operationId);
+          Logger.warn(`[RequestProcessor] 操作在第 ${attempt} 次尝试前被取消 (ID: ${operationId})`);
           throw new Error('Operation cancelled');
         }
 
         try {
-          Logger.output(`[RequestProcessor] Attempt ${attempt}/${maxRetries} for ${requestSpec.method} ${requestSpec.path} (ID: ${operationId})`);
+          if (attempt > 1) Logger.info(`[RequestProcessor] 尝试 ${attempt}/${maxRetries} (ID: ${operationId})`);
+          
           const response = await fetch(requestUrl, requestConfig);
 
           if (!response.ok) {
@@ -130,43 +242,39 @@ class RequestProcessor {
             try {
               errorBody = await response.text();
             } catch (e) {
-              // ignore if can't read body
-              Logger.output('[RequestProcessor] Could not read error response body for failed attempt', attempt, 'ID:', operationId);
+              Logger.warn(`[RequestProcessor] 无法读取错误响应体 (ID: ${operationId})`);
             }
             throw new Error(`HTTP ${response.status}: ${response.statusText}. Body: ${errorBody}`);
           }
           
-          Logger.output(`[RequestProcessor] Attempt ${attempt} successful for ${requestSpec.path} (ID: ${operationId})`);
+          Logger.success(`[RequestProcessor] 请求成功 (ID: ${operationId}, 尝试: ${attempt})`);
           return response; 
 
         } catch (error) {
           lastError = error;
 
           if (error.name === 'AbortError' || abortController.signal.aborted) {
-            Logger.output(`[RequestProcessor] Request aborted for ID: ${operationId} during attempt ${attempt}:`, error.message);
+            Logger.warn(`[RequestProcessor] 请求被中止 (ID: ${operationId})`);
             throw error; 
           }
           
-          Logger.output(`[RequestProcessor] Attempt ${attempt}/${maxRetries} failed for ${requestSpec.path} (ID: ${operationId}):`, error.message);
+          Logger.warn(`[RequestProcessor] 尝试 ${attempt} 失败: ${error.message}`);
 
           if (attempt < maxRetries) {
             await new Promise(resolve => setTimeout(resolve, retryDelay));
           } else {
-            Logger.output(`[RequestProcessor] Max retries (${maxRetries}) reached for ${requestSpec.path} (ID: ${operationId}). Last error:`, error.message);
-            // Fall through to throw lastError after the loop
+            Logger.error(`[RequestProcessor] 达到最大重试次数 (${maxRetries}) (ID: ${operationId})`);
           }
         }
       }
       
-      // This part is reached only if all retries failed (and it wasn't an AbortError)
       throw lastError;
 
     } catch (error) {
-      Logger.output('[RequestProcessor] Request execution failed ultimately for ID:', operationId, error.message);
+      Logger.error(`[RequestProcessor] 请求执行最终失败 (ID: ${operationId}): ${error.message}`);
       throw error; 
     } finally {
       this.activeOperations.delete(operationId);
-      Logger.output('[RequestProcessor] Cleaned up active operation for ID:', operationId);
     }
   }
   
@@ -174,17 +282,15 @@ class RequestProcessor {
     const controller = this.activeOperations.get(operationId);
     if (controller) {
       controller.abort();
-      // No need to delete here, 'finally' block in 'execute' will handle it.
-      Logger.output('[RequestProcessor] 操作已取消 (signal sent):', operationId);
+      Logger.warn(`[RequestProcessor] 主动取消操作 (ID: ${operationId})`);
     }
   }
   
   cancelAllOperations() {
     this.activeOperations.forEach((controller, id) => {
       controller.abort();
-      Logger.output('[RequestProcessor] 取消操作 (signal sent):', id);
+      Logger.warn(`[RequestProcessor] 批量取消操作 (ID: ${id})`);
     });
-    // No need to clear here, 'finally' block in 'execute' will handle it for each operation.
   }
   
   _constructUrl(requestSpec) {
@@ -231,7 +337,7 @@ class StreamHandler {
   }
   
   async processStream(response, operationId) {
-    Logger.output('[StreamHandler] 开始处理流式响应 for ID:', operationId);
+    Logger.info(`[StreamHandler] 开始处理流式响应 (ID: ${operationId})`);
     
     this._transmitHeaders(response, operationId);
     
@@ -243,7 +349,7 @@ class StreamHandler {
         const { done, value } = await reader.read();
         
         if (done) {
-          Logger.output('[StreamHandler] 流处理完成 for ID:', operationId);
+          Logger.success(`[StreamHandler] 流传输完成 (ID: ${operationId})`);
           this._transmitStreamEnd(operationId);
           break;
         }
@@ -252,13 +358,9 @@ class StreamHandler {
         this._transmitChunk(textChunk, operationId);
       }
     } catch (error) {
-      Logger.output('[StreamHandler] 流处理错误 for ID:', operationId, error.message);
-      // This error will be caught by ProxySystem if it propagates from here
-      // We should ensure that if an error happens during streaming, ProxySystem handles it.
-      // For now, just rethrow, it should be caught by _processProxyRequest's catch block
-      // if this function is awaited properly.
-      this._sendStreamError(error, operationId); // Send a specific stream error event
-      throw error; // Rethrow so _processProxyRequest knows something went wrong
+      Logger.error(`[StreamHandler] 流处理中断 (ID: ${operationId}): ${error.message}`);
+      this._sendStreamError(error, operationId); 
+      throw error; 
     }
   }
   
@@ -276,7 +378,6 @@ class StreamHandler {
     };
     
     this.communicator.transmit(headerMessage);
-    Logger.output('[StreamHandler] 响应头已传输 for ID:', operationId);
   }
   
   _transmitChunk(chunk, operationId) {
@@ -301,12 +402,12 @@ class StreamHandler {
   _sendStreamError(error, operationId) {
     const errorMessage = {
       request_id: operationId,
-      event_type: 'error', // Consistent with other error events
-      status: 500, // Or a more specific stream error code if available
+      event_type: 'error', 
+      status: 500, 
       message: `流处理错误 (ID: ${operationId}): ${error.message || '未知流错误'}`
     };
     this.communicator.transmit(errorMessage);
-    Logger.output('[StreamHandler] 流错误响应已发送 for ID:', operationId);
+    Logger.warn(`[StreamHandler] 已向客户端发送流错误通知 (ID: ${operationId})`);
   }
 }
 
@@ -322,14 +423,14 @@ class ProxySystem extends EventTarget {
   }
   
   async initialize() {
-    Logger.output('[ProxySystem] 系统初始化中...');
+    Logger.system('[ProxySystem] 系统初始化中...');
     
     try {
       await this.connectionManager.establish();
-      Logger.output('[ProxySystem] 系统初始化完成');
+      Logger.system('[ProxySystem] 系统初始化完成，就绪');
       this.dispatchEvent(new CustomEvent('ready'));
     } catch (error) {
-      Logger.output('[ProxySystem] 系统初始化失败:', error.message);
+      Logger.error('[ProxySystem] 系统初始化失败:', error.message);
       this.dispatchEvent(new CustomEvent('error', { detail: error }));
       throw error;
     }
@@ -341,32 +442,27 @@ class ProxySystem extends EventTarget {
     });
     
     this.connectionManager.addEventListener('disconnected', () => {
-      Logger.output('[ProxySystem] WebSocket disconnected, cancelling all operations.');
+      Logger.warn('[ProxySystem] WebSocket 断开，取消所有进行中的请求');
       this.requestProcessor.cancelAllOperations();
     });
   }
   
   async _handleIncomingMessage(messageData) {
-    let requestSpec; // Define here to be accessible in catch
+    let requestSpec; 
     try {
       requestSpec = JSON.parse(messageData);
       if (!requestSpec || !requestSpec.request_id) {
-        Logger.output('[ProxySystem] 收到无效请求: 缺少 request_id 或格式错误', messageData);
-        // Cannot send error response if request_id is missing.
+        Logger.warn('[ProxySystem] 收到无效请求: 格式错误或缺少ID');
         return;
       }
-      Logger.output('[ProxySystem] 收到请求:', requestSpec.method, requestSpec.path, '(ID:', requestSpec.request_id, ')');
+      Logger.info(`[ProxySystem] 收到新请求: ${requestSpec.method} ${requestSpec.path} (ID: ${requestSpec.request_id})`);
       
       await this._processProxyRequest(requestSpec);
     } catch (error) {
-      Logger.output('[ProxySystem] 消息处理或格式错误:', error.message, 'Data:', messageData);
-      // If requestSpec and request_id are available from a parse error, send error.
-      // If JSON.parse fails, requestSpec might be undefined.
+      Logger.error('[ProxySystem] 消息解析异常:', error.message);
       const operationId = requestSpec ? requestSpec.request_id : null;
       if (operationId) {
-        this._sendErrorResponse(error, operationId, '消息解析或初始处理错误');
-      } else {
-        Logger.output('[ProxySystem] 无法发送错误响应: 无效消息格式或缺少操作ID');
+        this._sendErrorResponse(error, operationId, '消息解析错误');
       }
     }
   }
@@ -376,17 +472,12 @@ class ProxySystem extends EventTarget {
     
     try {
       const response = await this.requestProcessor.execute(requestSpec, operationId);
-      // If execute is successful (after retries), process the stream.
       await this.streamHandler.processStream(response, operationId);
     } catch (error) {
-      // This error is now either an AbortError, an error after all retries from RequestProcessor,
-      // or an error from StreamHandler.processStream.
       if (error.name === 'AbortError') {
-        Logger.output('[ProxySystem] 请求被中止 (ID:', operationId, ')');
-        // No error response needed for client-initiated aborts unless specifically required.
+        Logger.warn(`[ProxySystem] 请求流程已中止 (ID: ${operationId})`);
       } else {
-        // This means all retries failed, or another unhandled error occurred.
-        Logger.output('[ProxySystem] 请求处理失败 (ID:', operationId, '), 发送错误响应:', error.message);
+        Logger.error(`[ProxySystem] 请求处理失败 (ID: ${operationId}) - ${error.message}`);
         this._sendErrorResponse(error, operationId);
       }
     }
@@ -394,19 +485,19 @@ class ProxySystem extends EventTarget {
   
   _sendErrorResponse(error, operationId, contextMessage = '代理系统错误') {
     if (!operationId) {
-      Logger.output('[ProxySystem] 无法发送错误响应：缺少操作ID');
+      Logger.warn('[ProxySystem] 无法发送错误响应：缺少ID');
       return;
     }
     
     const errorMessage = {
       request_id: operationId,
       event_type: 'error',
-      status: error.status || 500, // Use error's status if available (e.g. from HTTPError)
+      status: error.status || 500,
       message: `${contextMessage} (ID: ${operationId}): ${error.message || '未知错误'}`
     };
     
     this.connectionManager.transmit(errorMessage);
-    Logger.output('[ProxySystem] 错误响应已发送 for ID:', operationId);
+    Logger.info(`[ProxySystem] 错误回执已发送 (ID: ${operationId})`);
   }
 }
 
@@ -416,11 +507,9 @@ async function initializeProxySystem() {
   
   try {
     await proxySystem.initialize();
-    console.log('浏览器代理系统已成功启动');
-    Logger.output('浏览器代理系统已成功启动');
+    Logger.system('浏览器代理系统核心已启动');
   } catch (error) {
-    console.error('代理系统启动失败:', error);
-    Logger.output('代理系统启动失败:', error.message, error.stack);
+    Logger.error('代理系统启动崩溃:', error.message);
   }
 }
 
